@@ -1,0 +1,227 @@
+# Import Python packages 
+import pandas as pd
+import cassandra
+import re
+import os
+import glob
+import numpy as np
+import json
+import csv
+
+# checking the current working directory
+print(os.getcwd())
+
+# Get the current folder and subfolder event data
+filepath = os.getcwd() + '/event_data'
+
+# Create a for loop to create a list of files and collect each filepath
+for root, dirs, files in os.walk(filepath):
+    
+# join the file path and roots with the subdirectories using glob
+    file_path_list = glob.glob(os.path.join(root,'*'))
+    #print(file_path_list)
+
+# initiating an empty list of rows that will be generated from each file
+full_data_rows_list = [] 
+    
+# for every filepath in the file path list 
+for f in file_path_list:
+
+# reading csv file 
+    with open(f, 'r', encoding = 'utf8', newline='') as csvfile: 
+        # creating a csv reader object 
+        csvreader = csv.reader(csvfile) 
+        next(csvreader)
+        
+# extracting each data row one by one and append it        
+        for line in csvreader:
+            full_data_rows_list.append(line) 
+            
+
+print(f"Total rows : {len(full_data_rows_list)}")
+print(full_data_rows_list)
+
+# creating a smaller event data csv file called event_datafile_full csv that will be used to insert data into the \
+# Apache Cassandra tables
+csv.register_dialect('myDialect', quoting=csv.QUOTE_ALL, skipinitialspace=True)
+
+with open('event_datafile_new.csv', 'w', encoding = 'utf8', newline='') as f:
+    writer = csv.writer(f, dialect='myDialect')
+    writer.writerow(['artist','firstName','gender','itemInSession','lastName','length',\
+                'level','location','sessionId','song','userId'])
+    for row in full_data_rows_list:
+        if (row[0] == ''):
+            continue
+        writer.writerow((row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[12], row[13], row[16]))
+
+
+# check the number of rows in your csv file
+with open('event_datafile_new.csv', 'r', encoding = 'utf8') as f:
+    print(f"Total rows : {sum(1 for line in f)}")
+
+# This should make a connection to a Cassandra instance your local machine 
+# (127.0.0.1)
+
+from cassandra.cluster import Cluster
+try:
+    cluster = Cluster(['127.0.0.1'])
+    session = cluster.connect()
+    print("Connection Established !!")
+except Exception as e:
+    print(f"Connection Failed !! Error : {e}")
+
+try:
+    session.execute("""
+    CREATE KEYSPACE IF NOT EXISTS leila
+    WITH REPLICATION = 
+    { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }""" 
+                   )
+    print("keyspace is created!")
+except Exception as e:
+    print(f"Failed to create keyspace!! Error : {e}")
+
+try:
+    session.set_keyspace('leila')
+    print("keyspace is set!")
+except Exception as e:
+    print(e)
+
+
+# creating the session_item table. In this table, I've chosen the sessionid as partition key, 
+# which allows query1 to efficiently filter data based on this column. The iteminsession column acts as a 
+# clustering column, helping create a unique key for each item in the session.
+
+create1 = """CREATE TABLE IF NOT EXISTS session_item (
+              sessionid int, iteminSession int, artist text, song text, length float,
+              PRIMARY KEY (sessionid, iteminsession)
+              )"""
+
+try: 
+    session.execute(create1)
+    print("Table Created!")
+except Exception as e:
+    print(f"Table creation failed! Error : {e}")
+
+# Reading csv file and inserting rows into session_item table.
+file = 'event_datafile_new.csv'
+
+with open(file, encoding = 'utf8') as f:
+    csvreader = csv.reader(f)
+    next(csvreader) # Skip the header
+    for line in csvreader:
+        query = "INSERT INTO session_item (sessionid, iteminsession, artist, song, length) "
+        query = query + " VALUES (%s, %s, %s, %s, %s) "
+        session.execute(query, (int(line[8]), int(line[3]), line[0], line[10], float(line[5])) )
+
+#SELECT statement for quary1
+query1 = "SELECT artist, song, length FROM  session_item where sessionid = 338 and iteminsession = 4"
+try:
+    rows = session.execute(query1)
+except Exception as e:
+    print(e)
+    
+for row in rows:
+    print(row)
+
+
+# creating user_session table. I've chosen the combination of sessionid and userid as our partition keys 
+# because this helps us efficiently filter and access data for each user's specific sessions.
+# The iteminsession column acts as a clustering key, allowing us to maintain uniqueness and ensuring that
+# we can easily retrieve items in the exact order they were added during a session. By using the ORDER BY clause
+# on iteminsession, we ensure that when we query the data, it returns the items in a sequential manner, making it 
+# easier to analyze user behavior and interactions throughout their session.
+
+create2 = """CREATE TABLE IF NOT EXISTS user_session (
+              sessionid int, userid int, artist text, song text, 
+              firstname text, lastname text, iteminSession int,
+              PRIMARY KEY ((sessionid, userid), iteminsession) ) 
+              WITH CLUSTERING ORDER BY (iteminsession ASC)""" 
+           
+
+try: 
+    session.execute(create2)
+    print("Table Created!!")
+except Exception as e:
+    print(f"Table creation failed!! Error : {e}")
+
+    
+# Reading csv file and inserting rows into user_session table.  
+file = 'event_datafile_new.csv'
+
+with open(file, encoding = 'utf8') as f:
+    csvreader = csv.reader(f)
+    next(csvreader) # skip header
+    for line in csvreader:
+        query = "INSERT INTO user_session (sessionid, userid, artist, song, firstname, lastname, iteminsession) "
+        query = query + " VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        session.execute(query, (int(line[8]), int(line[10]), line[0], line[9], line[1], line[4], int(line[3])  ) )
+
+# SELECT statement for quary2
+query2 = "SELECT artist, song, firstname, lastname FROM  user_session where sessionid = 182 and userid = 10"
+try:
+    rows = session.execute(query2)
+except Exception as e:
+    print(e)
+
+for row in rows:
+    print(row)
+
+
+# creating the user_song table. I've decided to use the 'song' column as the partition key and `userid` as a clustering
+# column because it gives each song entry a unique identity in the table. This means we can easily pull up 
+# user information linked to specific songs without any confusion. Plus, The inclusion of `userid` as a clustering column
+# allows us to uniquely identify each user associated with a particular song. This means that for any given song,
+# we can retrieve all users who have interacted with it, while still maintaining the ability to distinguish between users
+
+create3 = """CREATE TABLE IF NOT EXISTS user_song (
+              song text, userid int, firstname text, lastname text, PRIMARY KEY((song), userid)
+              )"""
+
+try: 
+    session.execute(create3)
+    print("Table Created!!")
+except Exception as e:
+    print(f"Table creation failed!! Error : {e}")
+    
+    
+# Reading csv file and inserting rows into user_song table.   
+file = 'event_datafile_new.csv'
+
+with open(file, encoding = 'utf8') as f:
+    csvreader = csv.reader(f)
+    next(csvreader) # skip header
+    for line in csvreader:
+        query = "INSERT INTO user_song (song, userid, firstname, lastname) "
+        query = query + " VALUES (%s, %s, %s, %s) "
+        session.execute(query, ( line[9], int(line[10]), line[1], line[4] )  )
+
+# SELECT statement for quary3
+query3 = "SELECT firstname, lastname FROM user_song where song = 'All Hands Against His Own'"
+try:
+    rows = session.execute(query3)
+except Exception as e:
+    print(e)
+
+for row in rows:
+    print(row)
+
+
+#Drop the table session_item
+query = "DROP table session_item"
+try:
+    rows = session.execute(query)
+except Exception as e:
+    print(e)
+
+
+#Drop the table user_song
+query = "DROP table user_song"
+try:
+    rows = session.execute(query)
+except Exception as e:
+    print(e)
+
+session.shutdown()
+cluster.shutdown()
+
+                    
