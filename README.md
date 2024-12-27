@@ -1,7 +1,7 @@
 # Data-Modeling
 
 # Datasets
-For this project, you'll be working with one dataset: event_data. The directory of CSV files partitioned by date. Here are examples of filepaths to two files in the dataset:
+For this project, I worked with one dataset: event_data. The directory of CSV files is partitioned by date. Here are examples of file paths to two files in the dataset:
 
 event_data/2018-11-08-events.csv
 event_data/2018-11-09-events.csv
